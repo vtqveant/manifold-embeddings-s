@@ -1,4 +1,4 @@
-FROM python:3.10-slim AS builder
+FROM python:3.8-slim AS builder
 RUN apt-get update && \
     apt-get install -y git-lfs && \
     git lfs install && \

@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Union
 
 import torch
 from fastapi import FastAPI, APIRouter
@@ -7,6 +7,8 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from starlette.status import HTTP_400_BAD_REQUEST, HTTP_200_OK, HTTP_503_SERVICE_UNAVAILABLE
 from transformers import AutoTokenizer, AutoModel
+
+VERSION = "0.1.0"
 
 MODULE_NAME = "manifold-embeddings-s"
 MODEL_NAME = 'rubert-tiny2'
@@ -20,7 +22,7 @@ class Embedding(BaseModel):
 
 
 class RequestDTO(BaseModel):
-    input: str
+    input: Union[str, List[str]]
 
 
 class ResponseDTO(BaseModel):
@@ -33,25 +35,30 @@ class ResponseDTO(BaseModel):
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 model = AutoModel.from_pretrained(MODEL_PATH, local_files_only=True)
 
-app = FastAPI(title=MODULE_NAME, version="0.1.0")
+app = FastAPI(title=MODULE_NAME, version=VERSION)
 prefix_router = APIRouter(prefix="/v1")
 
 
-@prefix_router.post('/embeddings/')
-async def predict(request: RequestDTO) -> ResponseDTO | PlainTextResponse:
+@prefix_router.post('/embeddings/', response_model=ResponseDTO)
+async def embeddings(request: RequestDTO):
     if len(request.input) == 0:
-        return ResponseDTO(module_name=MODULE_NAME, task_id=request.task_id, result={})
-    if len(request.input) > 1:
-        return PlainTextResponse(status_code=HTTP_400_BAD_REQUEST, content="Multiple inputs not supported")
+        return PlainTextResponse(status_code=HTTP_400_BAD_REQUEST, content="No input")
+    elif isinstance(request.input, str):
+        entries = [request.input]
+    else:
+        entries = request.input
 
-    t = tokenizer(request.input, padding=True, truncation=True, return_tensors='pt')
-    with torch.no_grad():
-        model_output = model(**{k: v.to(model.device) for k, v in t.items()})
-    embeddings = model_output.last_hidden_state[:, 0, :]
-    embeddings = torch.nn.functional.normalize(embeddings)
-    result = embeddings[0].cpu().numpy()
+    results = []
+    for idx, entry in enumerate(entries):
+        t = tokenizer(request.input, padding=True, truncation=True, return_tensors='pt')
+        with torch.no_grad():
+            model_output = model(**{k: v.to(model.device) for k, v in t.items()})
+        embeddings = model_output.last_hidden_state[:, 0, :]
+        embeddings = torch.nn.functional.normalize(embeddings)
+        result = embeddings[0].cpu().numpy()
+        results.append(Embedding(index=idx, embedding=result))
 
-    return ResponseDTO(data=[Embedding(index=0, embedding=result)], model=MODEL_NAME)
+    return ResponseDTO(data=results, model=MODEL_NAME)
 
 
 @prefix_router.get('/readyz')
