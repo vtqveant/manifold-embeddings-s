@@ -2,6 +2,7 @@ import os
 from typing import List, Optional, Any, Union
 
 import torch
+import torch.nn.functional as F
 from fastapi import FastAPI, APIRouter
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
@@ -10,8 +11,7 @@ from transformers import AutoTokenizer, AutoModel
 
 VERSION = "0.1.0"
 
-MODULE_NAME = "manifold-embeddings-s"
-MODEL_NAME = 'rubert-tiny2'
+MODEL_NAME = 'all-MiniLM-L6-v2'
 MODEL_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'models', MODEL_NAME)
 
 
@@ -32,10 +32,17 @@ class ResponseDTO(BaseModel):
     usage: Optional[Any] = None
 
 
+# Mean Pooling - Take attention mask into account for correct averaging
+def mean_pooling(model_output, attention_mask):
+    token_embeddings = model_output[0]  # First element of model_output contains all token embeddings
+    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    return torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
 model = AutoModel.from_pretrained(MODEL_PATH, local_files_only=True)
 
-app = FastAPI(title=MODULE_NAME, version=VERSION)
+app = FastAPI(version=VERSION)
 prefix_router = APIRouter(prefix="/v1")
 
 
@@ -48,16 +55,14 @@ async def embeddings(request: RequestDTO):
     else:
         entries = request.input
 
-    results = []
-    for idx, entry in enumerate(entries):
-        t = tokenizer(request.input, padding=True, truncation=True, return_tensors='pt')
-        with torch.no_grad():
-            model_output = model(**{k: v.to(model.device) for k, v in t.items()})
-        embeddings = model_output.last_hidden_state[:, 0, :]
-        embeddings = torch.nn.functional.normalize(embeddings)
-        result = embeddings[0].cpu().numpy()
-        results.append(Embedding(index=idx, embedding=result))
+    encoded_input = tokenizer(entries, padding=True, truncation=True, return_tensors='pt')
+    with torch.no_grad():
+        model_output = model(**encoded_input)
 
+    sentence_embeddings = mean_pooling(model_output, encoded_input['attention_mask'])
+    sentence_embeddings = F.normalize(sentence_embeddings, p=2, dim=1)
+
+    results = [Embedding(index=idx, embedding=result) for idx, result in enumerate(sentence_embeddings)]
     return ResponseDTO(data=results, model=MODEL_NAME)
 
 
@@ -69,7 +74,7 @@ async def readyz():
         return PlainTextResponse(status_code=HTTP_200_OK)
 
 
-@prefix_router.get('/healthz')
+@prefix_router.get('/livez')
 async def healthz():
     return PlainTextResponse(status_code=HTTP_200_OK)
 
